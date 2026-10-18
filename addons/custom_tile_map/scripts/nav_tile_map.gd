@@ -1,0 +1,256 @@
+extends Node
+class_name NavTileMap
+
+var _navigation_datas :Array # as refrences
+
+# faster way to get id
+var _navigation_ids :Dictionary = {} # {(index as LAYER_ID):{ Vector2:int }
+var _navigation_pos :Dictionary = {} # {Vector2:NavigationData}
+
+# int as key is LAYER of naviagtion
+# for ex 0:ground, 1:wall, 2:sea
+onready var _navigations :Array = [] # [(index as LAYER_ID) [ AStar2D ]]
+
+func _ready():
+	set_process(false)
+	set_physics_process(false)
+	
+func load_data_nav(navigation_datas :Array):
+	_navigation_datas = navigation_datas
+	_clean()
+	
+	var layer = 0
+	for data in navigation_datas:
+		_load_data_nav(layer, data)
+		layer += 1
+		
+func is_nav_enable(layer_id :int, id :Vector2) -> bool:
+	if _get_navigation_id(layer_id, id) == -1:
+		return false
+		
+	var navigation_id :int =_get_navigation_id(layer_id, id)
+	return not _navigations[layer_id].is_point_disabled(navigation_id)
+	
+func enable_nav_tile(layer_id :int, id :Vector2, enable :bool):
+	var navigation_id :int = _get_navigation_id(layer_id, id)
+	if navigation_id != -1:
+		_enable_nav_tile(_navigations[layer_id], navigation_id, enable)
+		_navigation_datas[layer_id]
+		
+		# update to _navigation_datas refrences
+		var nav_data :NavigationData
+		for i in _navigation_datas[layer_id]:
+			if i.id == id:
+				nav_data = i
+				break
+		
+		if not nav_data:
+			return
+			
+		nav_data.enable = enable
+			
+# param blocked_ids is usefull for 
+# seting temporary blocked tile
+# like ally unit in the way
+
+# param use_safe 
+#is use to get path event if the a -> b path is blocked or b is invalid
+# but you get the path that bassicaly stop near actual destination
+func get_navigation(layer_id :int, start_id :Vector2, end_id :Vector2, blocked_ids :Array = [], use_safe :bool = false) -> PoolVector2Array:
+	if not _has_layer(layer_id):
+		return PoolVector2Array([])
+		
+	var start :int = _get_navigation_id(layer_id, start_id)
+	var end :int = _get_navigation_id(layer_id, end_id)
+	if start == -1 or end == -1:
+		return PoolVector2Array([])
+		
+	return _get_navigation(_navigations[layer_id], start, end, blocked_ids, use_safe) # [ Vector2 ]
+	
+func get_pos_v3(id :Vector2) -> Vector3:
+	return get_nav_data(id).pos
+	
+func get_nav_data(id :Vector2) -> NavigationData:
+	return _navigation_pos[id]
+	
+func get_astar(layer_id :int) -> AStar2D:
+	return _navigations[layer_id]
+	
+func get_navigation_id(layer_id :int, id :Vector2) -> int:
+	return _get_navigation_id(layer_id, id)
+	
+func _load_data_nav(layer_id :int, navigation_map :Array):
+	if not _has_layer(layer_id):
+		_navigations.append(AStar2D.new())
+		_navigation_ids[layer_id] = {}
+		
+	var _navigation :AStar2D = _navigations[layer_id]
+	var _navigation_id :Dictionary = _navigation_ids[layer_id]
+	
+	_maping_ids(_navigation_id, navigation_map)
+	_add_point(_navigation, navigation_map)
+	_connect_point(_navigation, navigation_map, layer_id)
+	_set_obstacle(_navigation, navigation_map)
+	
+# if return were -1 = not found
+func _get_navigation_id(layer_id :int, id :Vector2) -> int:
+	if not _navigation_ids.has(layer_id):
+		return -1
+		
+	if not _navigation_ids[layer_id].has(id):
+		return -1
+	
+	return _navigation_ids[layer_id][id]
+	
+func _get_navigation(_nav :AStar2D, start :int, end :int, _blocked_nav_ids :Array, use_safe :bool = false) -> PoolVector2Array:
+	var paths :PoolVector2Array = PoolVector2Array([])
+	if not _nav.has_point(start):
+		return paths
+		
+	if not _nav.has_point(end):
+		return paths
+		
+	var _restored_disabled_point :Array = []
+	
+	# blocked tile
+	for navigation_id in _blocked_nav_ids:
+		var has_point :bool = _nav.has_point(navigation_id)
+		var is_already_disabled :bool = _nav.is_point_disabled(navigation_id)
+		if has_point and not is_already_disabled:
+			_restored_disabled_point.append(navigation_id)
+			_nav.set_point_disabled(navigation_id, true)
+		
+	# get path with blocked tiles
+	paths = _get_path_safe(_nav, start, end) if use_safe else _nav.get_point_path(start, end)
+	
+	# open blocked tile
+	for navigation_id in _restored_disabled_point:
+		_nav.set_point_disabled(navigation_id, false)
+		
+	return paths
+	
+func _get_path_safe(astar: AStar2D, start_id: int, target_id: int) -> PoolVector2Array:
+	if not astar.is_point_disabled(target_id):
+		return astar.get_point_path(start_id, target_id)
+		
+	var connections = astar.get_point_connections(target_id)
+	var best_path = PoolVector2Array()
+	var best_distance = INF
+
+	for neighbor_id in connections:
+		if astar.is_point_disabled(neighbor_id):
+			continue
+			
+		var path = astar.get_point_path(start_id, neighbor_id)
+		if path.size() > 0:
+			var dist = astar.get_point_position(neighbor_id).distance_to(
+				astar.get_point_position(target_id)
+			)
+			if dist < best_distance:
+				best_distance = dist
+				best_path = path
+				
+	return best_path
+func _add_point(nav :AStar2D, data :Array):
+	for i in data:
+		var x :NavigationData = i
+		nav.add_point(x.navigation_id, x.id)
+		
+func _maping_ids(_navigation_id :Dictionary, data :Array):
+	for i in data:
+		var x :NavigationData = i
+		_navigation_id[x.id] = x.navigation_id
+		_navigation_pos[x.id] = x
+		
+func _connect_point(nav :AStar2D, data :Array, layer_id:int):
+	for i in data:
+		var x :NavigationData = i
+		var neighbors :Array = TileMapUtils.get_directions() if x.neighbor_mode == 0 else TileMapUtils.ARROW_DIRECTIONS
+		for id in neighbors:
+			var next_id :Vector2 = id + x.id
+			if not _navigation_ids[layer_id].has(next_id):
+				continue
+				
+			var nex_nav_id :int = _navigation_ids[layer_id][next_id]
+			if nav.has_point(nex_nav_id):
+				nav.connect_points(x.navigation_id, nex_nav_id, false)
+
+func is_point_connected(layer_id:int, tile_id_1: Vector2, tile_id_2: Vector2) -> bool:
+	if tile_id_1 == tile_id_2:
+		return true
+	
+	var point_id_1 :int = _get_navigation_id(layer_id, tile_id_1)
+	var point_id_2 :int = _get_navigation_id(layer_id, tile_id_2)
+	if -1 in [point_id_1, point_id_2]:
+		return false
+		
+	if point_id_1 == point_id_2:
+		return true
+		
+	var nav :AStar2D = _navigations[layer_id]
+	return nav.are_points_connected(point_id_1, point_id_2)
+
+func set_point_connection(layer_id:int, tile_id_1: Vector2, tile_id_2: Vector2, set_connect :bool = true) -> void:
+	var nav :AStar2D = _navigations[layer_id]
+	var point_id_1 :int = _get_navigation_id(layer_id, tile_id_1)
+	var point_id_2 :int = _get_navigation_id(layer_id, tile_id_2)
+	if -1 in [point_id_1, point_id_2]:
+		return
+	
+	if set_connect:
+		nav.connect_points(point_id_1, point_id_2, false)
+		
+	else:
+		nav.disconnect_points(point_id_1, point_id_2)
+	
+func reconnect_point(layer_id:int, tile_id: Vector2, new_neighbors: Array) -> void:
+	var nav :AStar2D = _navigations[layer_id]
+	var point_id :int = _get_navigation_id(layer_id, tile_id)
+	if point_id == -1:
+		return
+	
+	if !nav.has_point(point_id):
+		return
+		
+	# Remove old links
+	for conn in nav.get_point_connections(point_id):
+		nav.disconnect_points(point_id, conn)
+		
+	#print("connect %s with %s" %[tile_id, new_neighbors])
+	
+	# Add new links
+	for neighbor_tile in new_neighbors:
+		var neighbor_id :int = _navigation_ids[layer_id][neighbor_tile]
+		if neighbor_id == point_id:
+			continue
+			
+		if nav.has_point(neighbor_id):
+			nav.connect_points(point_id, neighbor_id)
+			
+func _set_obstacle(nav :AStar2D, data :Array):
+	for i in data:
+		var x :NavigationData = i
+		_enable_nav_tile(nav, x.navigation_id, x.enable)
+	
+func _enable_nav_tile(nav :AStar2D, navigation_id :int, enable :bool = true):
+	if nav.has_point(navigation_id):
+		nav.set_point_disabled(navigation_id, not enable)
+		
+func _clean():
+	for _navigation in _navigations:
+		_navigation.clear()
+		
+	for layer_id in _navigation_ids.keys():
+		_navigation_ids[layer_id].clear()
+		
+	_navigations.clear()
+	_navigation_ids.clear()
+	_navigation_pos.clear()
+	
+func _has_layer(id) -> bool:
+	return id >= 0 and id < _navigations.size()
+
+
+
+
+
